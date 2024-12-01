@@ -1,34 +1,62 @@
 import { NextResponse } from 'next/server';
 import { downloadYouTubeAudio, transcribeAudio, cleanupTempFiles } from '@/lib/audio-utils';
+import { extractFrames } from '@/lib/frame-utils';
+import { downloadYouTubeVideo } from '@/lib/video-processor';
 import path from 'path';
 import os from 'os';
+import * as fs from 'fs/promises';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 
 // In-memory store for progress updates
 const progressUpdates = new Map<string, any>();
 
-function extractVideoId(videoUrl: string) {
-  const videoId = videoUrl.split('v=')[1].split('&')[0];
-  return videoId;
+function extractYouTubeId(url: string): string | null {
+  try {
+    const videoUrl = new URL(url);
+    const searchParams = new URLSearchParams(videoUrl.search);
+    return searchParams.get('v');
+  } catch (error) {
+    console.error('Error parsing YouTube URL:', error);
+    return null;
+  }
 }
 
 export async function POST(request: Request) {
   let videoId: string | null = null;
+  let tempDir: string | null = null;
   
   try {
-    // Require authentication
-    const user = await requireAuth();
+    let userId: string;
+    
+    // Skip authentication in development
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Skipping auth in development mode');
+      // Create or find test user
+      const testUser = await prisma.user.upsert({
+        where: { email: 'test@example.com' },
+        update: {},
+        create: {
+          email: 'test@example.com',
+          clerkId: 'test_clerk_id',
+          name: 'Test User'
+        }
+      });
+      userId = testUser.id;
+    } else {
+      const user = await requireAuth();
+      userId = user.id;
+    }
 
     const { videoUrl } = await request.json();
     if (!videoUrl) {
-      return NextResponse.json({ success: false, error: 'No video URL provided' }, { status: 400 });
+      return NextResponse.json({ error: 'Video URL is required' }, { status: 400 });
     }
 
     // Extract video ID from URL
-    videoId = extractVideoId(videoUrl);
+    videoId = extractYouTubeId(videoUrl);
     if (!videoId) {
-      return NextResponse.json({ success: false, error: 'Invalid YouTube URL' }, { status: 400 });
+      return NextResponse.json({ error: 'Invalid YouTube URL' }, { status: 400 });
     }
 
     // Create video record in database
@@ -37,96 +65,97 @@ export async function POST(request: Request) {
         youtubeId: videoId,
         title: videoId, // We'll update this later with actual title
         status: 'PROCESSING',
-        userId: user.id,
+        userId: userId,
       },
     });
 
-    // Initialize progress
+    // Create temp directory for processing
+    tempDir = path.join(os.tmpdir(), `codesnippet-frames-${Date.now()}`);
+    await fs.mkdir(tempDir, { recursive: true });
+
+    // Download video
+    const videoPath = await downloadYouTubeVideo(videoId, path.join(tempDir, `${videoId}.mp4`));
+    
+    // Update progress for frame extraction
     progressUpdates.set(videoId, {
-      stage: 'downloading',
-      progress: 0,
-      videoId: video.id, // Store database video ID
-      message: 'Starting download...'
+      stage: 'processing',
+      progress: 50,
+      message: 'Extracting frames and performing OCR...'
     });
+    
+    // Extract frames
+    console.log('Extracting frames...');
+    const frames = await extractFrames(videoPath, tempDir, videoId);
 
-    // Create temp directory if it doesn't exist
-    const tempDir = path.join(os.tmpdir(), 'codesnippet');
-    const outputPath = path.join(tempDir, `${videoId}.mp3`);
-
-    // Download audio
-    console.log('Downloading audio...');
-    const audioPath = await downloadYouTubeAudio(videoId, outputPath, (progress) => {
-      if (!videoId) return; // TypeScript safety check
-      progressUpdates.set(videoId, {
-        stage: 'downloading',
-        progress: progress * 0.6, // 60% of total progress
-        message: `Downloading audio: ${progress}%`
+    // Save frames to database
+    if (frames.length > 0) {
+      await prisma.frame.createMany({
+        data: frames.map(frame => ({
+          videoId: video.id,
+          url: frame.url,
+          timestamp: frame.timestamp,
+          hasCode: frame.hasCode,
+          text: frame.text || '',
+        }))
       });
-    });
+    }
 
-    // Transcribe audio
-    console.log('Transcribing audio...');
-    const transcription = await transcribeAudio(audioPath, (progress) => {
-      if (!videoId) return; // TypeScript safety check
-      progressUpdates.set(videoId, {
-        stage: 'transcribing',
-        progress: 60 + (progress * 0.4), // Remaining 40% of progress
-        message: `Transcribing audio: ${progress}%`
-      });
-    });
-
-    // Clean up audio file
-    await cleanupTempFiles(audioPath);
-
-    // Update video status on completion
+    // Update video status and progress
     await prisma.video.update({
       where: { id: video.id },
-      data: {
-        status: 'COMPLETED',
-        transcript: {
-          create: {
-            content: transcription,
-            segments: {
-              createMany: {
-                data: [{
-                  startTime: 0,
-                  endTime: 0, // We don't have segment info from basic Whisper output
-                  text: transcription,
-                }],
-              },
-            },
-          },
-        },
-      },
+      data: { status: 'COMPLETED' }
     });
 
-    // Set final progress and result
-    const result = { success: true, transcription, message: 'Processing complete' };
     progressUpdates.set(videoId, {
       stage: 'complete',
       progress: 100,
-      message: 'Processing complete',
-      result
+      message: 'Processing completed',
+      data: {
+        videoId: video.id,
+        frameCount: frames.length
+      }
     });
 
-    return NextResponse.json(result);
+    return NextResponse.json({ 
+      success: true, 
+      videoId: video.id,
+      frames 
+    });
 
-  } catch (error: unknown) {
+  } catch (error) {
     console.error('Error processing video:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    
+
     if (videoId) {
-      const progress = progressUpdates.get(videoId);
-      if (progress?.videoId) {
-        await prisma.video.update({
-          where: { id: progress.videoId },
-          data: { status: 'FAILED' },
+      try {
+        // First find the video by youtubeId
+        const video = await prisma.video.findFirst({
+          where: { youtubeId: videoId }
         });
+
+        if (video) {
+          await prisma.video.update({
+            where: { id: video.id },
+            data: { status: 'FAILED' }
+          });
+        }
+      } catch (dbError) {
+        console.error('Error updating video status:', dbError);
       }
-      progressUpdates.delete(videoId);
     }
-    
-    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 });
+
+    return NextResponse.json({ 
+      error: error instanceof Error ? error.message : 'An unknown error occurred' 
+    }, { status: 500 });
+
+  } finally {
+    // Cleanup temp directory
+    if (tempDir) {
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      } catch (error) {
+        console.error('Error cleaning up temp directory:', error);
+      }
+    }
   }
 }
 

@@ -37,6 +37,7 @@ model Video {
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   codeSnippets CodeSnippet[]
   transcript   Transcript?
+  frames       Frame[]
 
   @@index([userId])
 }
@@ -76,6 +77,20 @@ model TranscriptSegment {
   updatedAt   DateTime   @updatedAt
 
   @@index([transcriptId])
+}
+
+model Frame {
+  id        String   @id @default(cuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  url       String
+  timestamp Float
+  hasCode   Boolean
+  text      String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([videoId])
 }
 
 enum VideoStatus {

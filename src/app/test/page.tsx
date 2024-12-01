@@ -1,11 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { Frame } from '@/lib/frame-utils';
 
 interface ProcessingProgress {
-  stage: 'downloading' | 'converting' | 'transcribing' | 'analyzing' | 'complete' | 'error';
+  stage: 'downloading' | 'converting' | 'transcribing' | 'analyzing' | 'extracting_frames' | 'ocr_processing' | 'complete' | 'error' | 'unknown';
   progress: number;
   message: string;
+  frames?: {
+    url: string;
+    timestamp: number;
+    hasCode: boolean;
+    text?: string;
+  }[];
+  data?: any;
 }
 
 export default function TestPage() {
@@ -65,7 +73,20 @@ export default function TestPage() {
             setLoading(false);
             clearInterval(pollInterval);
             setProcessingVideoId(null);
-            setResult(progressData.result);
+            setResult(progressData.data);
+            return;
+          }
+
+          // If we get an unknown stage, assume something went wrong
+          if (progressData.stage === 'unknown') {
+            attempts++; // Only increment attempts for unknown status
+            if (attempts >= 5) { // Give it 5 tries before erroring
+              setError('Processing status unknown');
+              setLoading(false);
+              clearInterval(pollInterval);
+              setProcessingVideoId(null);
+            }
+            return;
           }
         } catch (err) {
           console.error('Error polling progress:', err);
@@ -171,24 +192,40 @@ export default function TestPage() {
       )}
 
       {result && (
-        <div className="mt-8 p-4 bg-white rounded-lg shadow">
-          <h2 className="text-xl font-semibold mb-4">Processing Results</h2>
-          <div className="space-y-4">
-            {result.success ? (
-              <>
-                <div className="p-4 bg-green-100 text-green-700 rounded">
-                  Successfully processed video!
+        <div className="mt-8">
+          <h2 className="text-xl font-bold mb-4">Processing Results</h2>
+          <div className="bg-gray-50 p-4 rounded">
+            <p className="mb-2">Video ID: {result.videoId}</p>
+            <p className="mb-4">Total Frames: {result.frameCount}</p>
+            {result.frames && result.frames.length > 0 && (
+              <div>
+                <h3 className="font-semibold mb-2">Detected Code Frames:</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {result.frames
+                    .filter((frame: Frame) => frame.hasCode)
+                    .map((frame: Frame, index: number) => (
+                      <div key={index} className="border rounded p-4">
+                        <img 
+                          src={frame.url} 
+                          alt={`Code frame at ${frame.timestamp}s`}
+                          className="w-full h-auto mb-2"
+                        />
+                        <p className="text-sm text-gray-600">
+                          Timestamp: {frame.timestamp.toFixed(2)}s
+                        </p>
+                        {frame.text && (
+                          <details className="mt-2">
+                            <summary className="text-sm text-blue-600 cursor-pointer">
+                              Show Detected Text
+                            </summary>
+                            <pre className="mt-2 text-xs bg-gray-100 p-2 rounded overflow-x-auto">
+                              {frame.text}
+                            </pre>
+                          </details>
+                        )}
+                      </div>
+                    ))}
                 </div>
-                <div className="mt-4">
-                  <h3 className="font-medium mb-2">Transcription:</h3>
-                  <div className="p-4 bg-gray-50 rounded whitespace-pre-wrap font-mono text-sm">
-                    {result.transcription}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="p-4 bg-red-100 text-red-700 rounded">
-                {result.error || 'Failed to process video'}
               </div>
             )}
           </div>

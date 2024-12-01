@@ -29,6 +29,22 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## Setup Tesseract OCR
+
+1. Download Tesseract installer for Windows:
+   - Go to [UB Mannheim's Tesseract page](https://github.com/UB-Mannheim/tesseract/wiki)
+   - Download the latest 64-bit installer (e.g., `tesseract-ocr-w64-setup-5.3.3.20231005.exe`)
+
+2. Install Tesseract:
+   - Run the installer
+   - **Important**: Remember to add Tesseract to your system PATH during installation
+   - Default install location: `C:\Program Files\Tesseract-OCR`
+
+3. Verify installation:
+   - Open Command Prompt
+   - Run: `tesseract --version`
+   - If you see version information, installation was successful
+
 ## Deploy on Vercel
 
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.

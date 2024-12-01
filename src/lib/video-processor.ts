@@ -4,6 +4,7 @@ import { downloadYouTubeAudio, cleanupTempFiles } from './audio-utils';
 import { prisma } from './prisma';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { spawn } from 'child_process';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -125,6 +126,38 @@ export async function processVideo(
     });
     throw error;
   }
+}
+
+export async function downloadYouTubeVideo(videoId: string, outputPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Ensure output directory exists
+    const outputDir = path.dirname(outputPath);
+    fs.mkdir(outputDir, { recursive: true }).catch(console.error);
+
+    const ytDlp = spawn('yt-dlp', [
+      `https://www.youtube.com/watch?v=${videoId}`,
+      '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
+      '--merge-output-format', 'mp4',
+      '--output', outputPath,
+      '--no-playlist',
+    ]);
+
+    ytDlp.stderr.on('data', (data) => {
+      console.error(`yt-dlp Error: ${data}`);
+    });
+
+    ytDlp.stdout.on('data', (data) => {
+      console.log(`yt-dlp Output: ${data}`);
+    });
+
+    ytDlp.on('close', (code) => {
+      if (code === 0) {
+        resolve(outputPath);
+      } else {
+        reject(new Error(`yt-dlp process exited with code ${code}`));
+      }
+    });
+  });
 }
 
 async function generateTranscript(videoId: string, audioPath: string): Promise<TranscriptSegment[]> {

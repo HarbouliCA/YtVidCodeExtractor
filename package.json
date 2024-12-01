@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "setup": "node scripts/setup-tesseract.js"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.5.1",
@@ -38,6 +39,7 @@
     "svix": "^1.42.0",
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",
+    "tesseract.js": "^5.1.1",
     "youtube-dl-exec": "^3.0.10",
     "yt-dlp-exec": "^1.0.2",
     "ytdl-core": "^4.11.5",
