@@ -437,58 +437,72 @@ export async function downloadYouTubeAudio(videoId: string, outputPath: string, 
   }
 }
 
+export interface TranscriptionSegment {
+  start: number;
+  end: number;
+  text: string;
+  type?: 'code' | 'explanation' | 'other';
+}
+
 export async function transcribeAudio(audioPath: string, onProgress?: (progress: number) => void): Promise<string> {
   try {
-    // Use Whisper for transcription
-    console.log('Transcribing audio using Whisper...');
     onProgress?.(0);
-    
-    const command = `whisper "${audioPath}" --model base --output_format txt --output_dir "${path.dirname(audioPath)}"`;
-    
-    const child = spawn(command, [], { shell: true });
-    
-    // Track transcription progress through log messages
-    child.stdout.on('data', (data) => {
-      const output = data.toString();
-      console.log('Whisper stdout:', output);
+    console.log('Starting Whisper transcription...');
+
+    // Run Python script for transcription
+    const process = spawn('python', [
+      'scripts/transcribe.py',
+      audioPath,
+      '--model', 'base'  // Use base model for balance of speed/accuracy
+    ]);
+
+    let output = '';
+    let error = '';
+
+    process.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    process.stderr.on('data', (data) => {
+      const text = data.toString();
+      // Handle progress updates from stderr
+      if (text.includes('Loading Whisper model')) {
+        onProgress?.(25);
+      } else if (text.includes('Starting transcription')) {
+        onProgress?.(50);
+      }
       
-      // Try to estimate progress from Whisper output
-      if (output.includes('Detecting language')) {
-        onProgress?.(10);
-      } else if (output.includes('Transcribing')) {
-        onProgress?.(30);
+      // Log status messages but collect errors
+      if (text.startsWith('Status:')) {
+        console.log(text.trim());
+      } else if (text.startsWith('Error:')) {
+        error += text;
       }
     });
 
-    child.stderr.on('data', (data) => {
-      console.error('Whisper stderr:', data.toString());
+    const exitCode = await new Promise<number>((resolve) => {
+      process.on('close', resolve);
     });
 
-    // Wait for process to complete
-    await new Promise<void>((resolve, reject) => {
-      child.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Whisper exited with code ${code}`));
-        }
-      });
-    });
+    if (exitCode !== 0) {
+      throw new Error(`Transcription failed: ${error}`);
+    }
 
-    onProgress?.(90); // Transcription complete
+    onProgress?.(100);
 
-    // Read the transcription file (Whisper outputs a .txt file)
-    const transcriptionPath = audioPath.replace(/\.[^/.]+$/, '.txt');
-    const transcription = await fs.promises.readFile(transcriptionPath, 'utf-8');
-    
-    // Clean up transcription file
-    await cleanupTempFiles(transcriptionPath);
-    onProgress?.(100); // Cleanup complete
-
-    return transcription;
-  } catch (error: unknown) {
+    try {
+      // Parse and validate JSON output
+      const result = JSON.parse(output.trim());
+      if (!result.segments || !Array.isArray(result.segments)) {
+        throw new Error('Invalid transcript format: missing segments array');
+      }
+      return output.trim();
+    } catch (e) {
+      console.error('JSON parsing error:', e);
+      throw new Error('Invalid JSON output from transcription');
+    }
+  } catch (error) {
     console.error('Error transcribing audio:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    throw new Error(`Failed to transcribe audio: ${errorMessage}`);
+    throw error;
   }
 }

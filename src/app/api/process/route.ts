@@ -1,12 +1,23 @@
 import { NextResponse } from 'next/server';
-import { downloadYouTubeAudio, transcribeAudio, cleanupTempFiles } from '@/lib/audio-utils';
+import { downloadYouTubeAudio, transcribeAudio, cleanupTempFiles, type TranscriptionSegment } from '@/lib/audio-utils';
 import { extractFrames } from '@/lib/frame-utils';
 import { downloadYouTubeVideo } from '@/lib/video-processor';
 import path from 'path';
 import os from 'os';
-import * as fs from 'fs/promises';
+import { promises as fs } from 'fs';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { z } from 'zod';
+
+// Define types for transcript data
+interface TranscriptData {
+  segments: TranscriptionSegment[];
+  metadata: {
+    totalDuration: number;
+    segmentCount: number;
+    lastUpdated: string;
+  };
+}
 
 // In-memory store for progress updates
 const progressUpdates = new Map<string, any>();
@@ -20,6 +31,63 @@ function extractYouTubeId(url: string): string | null {
     console.error('Error parsing YouTube URL:', error);
     return null;
   }
+}
+
+// Helper function to detect content type in transcription
+function detectContentType(text: string): 'code' | 'explanation' | 'other' {
+  // Code indicators
+  const codeKeywords = [
+    'function', 'class', 'const', 'let', 'var',
+    'if', 'else', 'for', 'while', 'return',
+    'import', 'export', 'async', 'await'
+  ];
+  
+  const codeSymbols = ['{', '}', '(', ')', '[', ']', ';', '=>', '===', '!=='];
+  
+  // Check for code patterns
+  const hasCodeKeywords = codeKeywords.some(keyword => 
+    new RegExp(`\\b${keyword}\\b`).test(text.toLowerCase())
+  );
+  
+  const hasCodeSymbols = codeSymbols.some(symbol => text.includes(symbol));
+  
+  // Explanation indicators
+  const explanationPhrases = [
+    'this means', 'let me explain', 'basically',
+    'in other words', 'what this does', 'this is how'
+  ];
+  
+  const isExplanation = explanationPhrases.some(phrase => 
+    text.toLowerCase().includes(phrase)
+  );
+  
+  if (hasCodeKeywords || hasCodeSymbols) return 'code';
+  if (isExplanation) return 'explanation';
+  return 'other';
+}
+
+// Helper function to parse transcript into segments
+function parseTranscript(transcript: string): TranscriptionSegment[] {
+  // Split transcript into sentences
+  const sentences = transcript.split(/[.!?]+/).filter(Boolean);
+  
+  let currentTime = 0;
+  const AVERAGE_WORDS_PER_SECOND = 2.5; // Assuming average speaking rate
+  
+  return sentences.map(sentence => {
+    const words = sentence.trim().split(/\s+/).length;
+    const duration = words / AVERAGE_WORDS_PER_SECOND;
+    
+    const segment: TranscriptionSegment = {
+      start: currentTime,
+      end: currentTime + duration,
+      text: sentence.trim(),
+      type: detectContentType(sentence)
+    };
+    
+    currentTime += duration;
+    return segment;
+  });
 }
 
 export async function POST(request: Request) {
@@ -76,6 +144,40 @@ export async function POST(request: Request) {
     // Download video
     const videoPath = await downloadYouTubeVideo(videoId, path.join(tempDir, `${videoId}.mp4`));
     
+    // Download and transcribe audio
+    progressUpdates.set(videoId, {
+      stage: 'transcribing',
+      progress: 30,
+      message: 'Downloading and transcribing audio...'
+    });
+
+    const audioPath = path.join(tempDir, `${videoId}.mp3`);
+    await downloadYouTubeAudio(videoId, audioPath);
+    const rawTranscript = await transcribeAudio(audioPath);
+
+    // Parse the raw transcript into segments
+    const transcriptionSegments = parseTranscript(rawTranscript);
+
+    // Save transcription to database
+    const transcriptData = {
+      segments: transcriptionSegments.map(segment => ({
+        ...segment,
+        text: segment.text.trim(),
+        type: segment.type || 'other'
+      })),
+      metadata: {
+        totalDuration: transcriptionSegments[transcriptionSegments.length - 1].end,
+        segmentCount: transcriptionSegments.length,
+        lastUpdated: new Date().toISOString()
+      }
+    } as const;
+
+    await prisma.$executeRaw`
+      UPDATE Video 
+      SET transcript = ${JSON.stringify(transcriptData)}
+      WHERE id = ${video.id}
+    `;
+
     // Update progress for frame extraction
     progressUpdates.set(videoId, {
       stage: 'processing',
@@ -112,7 +214,8 @@ export async function POST(request: Request) {
       message: 'Processing completed',
       data: {
         videoId: video.id,
-        frameCount: frames.length
+        frameCount: frames.length,
+        transcript: transcriptData
       }
     });
 

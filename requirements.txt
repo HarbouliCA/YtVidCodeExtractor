@@ -2,3 +2,6 @@ numpy>=1.26.0
 opencv-python>=4.8.1.78
 pytesseract>=0.3.10
 Pillow>=10.1.0
+openai-whisper>=20231117
+torch>=2.1.0
+ffmpeg-python>=0.2.0
